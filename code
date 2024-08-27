@@ -1,0 +1,142 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras import layers, models
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.model_selection import TimeSeriesSplit
+
+df = pd.read_csv(r"C:\Users\zales\Downloads\Stray Dogs Prishtina.csv")
+print(df)
+columns_to_check = ['location-long', 'location-lat', 'ground-speed', 'heading']
+df = df.dropna(subset=columns_to_check)
+
+df['heading_sin'] = np.sin(np.deg2rad(df['heading']))
+df['heading_cos'] = np.cos(np.deg2rad(df['heading']))
+
+data = df[['timestamp', 'location-long', 'location-lat', 'ground-speed', 'heading_sin', 'heading_cos']].dropna()
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data[['location-long', 'location-lat', 'ground-speed', 'heading_sin', 'heading_cos']])
+
+def create_sequences(data, seq_length):
+    sequences = []
+    labels = []
+    for i in range(len(data) - seq_length):
+        sequences.append(data[i:i+seq_length])
+        labels.append(data[i+seq_length])
+    return np.array(sequences), np.array(labels)
+
+seq_length = 30
+X, y = create_sequences(scaled_data, seq_length)
+print("Kształt X:", X.shape)
+print("Kształt y:", y.shape)
+
+tscv = TimeSeriesSplit(n_splits=5)
+mse_scores = []
+
+for train_index, test_index in tscv.split(X):
+    X_train, X_test = X[train_index], X[test_index]
+    y_train, y_test = y[train_index], y[test_index]
+
+    model = Sequential()
+    model.add(LSTM(30, return_sequences=True, input_shape=(seq_length, 5)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(30, return_sequences=False))
+    model.add(Dropout(0.2))
+    model.add(Dense(5))  # Liczba wyjść: 5
+    model.compile(optimizer='adam', loss='mean_squared_error')
+
+    model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+
+
+    y_pred = model.predict(X_test)
+
+    y_test_inverse = scaler.inverse_transform(y_test)
+    y_pred_inverse = scaler.inverse_transform(y_pred)
+
+    mse = mean_squared_error(y_test_inverse, y_pred_inverse)
+    mse_scores.append(mse)
+
+
+print(f'Srednie MSE: {np.mean(mse_scores)}')
+print(f'Odchylenie standardowe MSE: {np.std(mse_scores)}')
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+print("Kształt X_train:", X_train.shape)
+print("Kształt y_train:", y_train.shape)
+print("Kształt X_test:", X_test.shape)
+print("Kształt y_test:", y_test.shape)
+
+
+history = model.fit(X_train, y_train, epochs=20, batch_size=32, validation_data=(X_test, y_test))
+
+
+y_pred = model.predict(X_test)
+
+
+train_predictions = scaler.inverse_transform(model.predict(X_train))
+test_predictions = scaler.inverse_transform(y_pred)
+y_train_inverse = scaler.inverse_transform(y_train)
+y_test_inverse = scaler.inverse_transform(y_test)
+
+
+y_pred_heading_sin = y_pred_inverse[:, 3]
+y_pred_heading_cos = y_pred_inverse[:, 4]
+y_pred_heading = np.arctan2(y_pred_heading_sin, y_pred_heading_cos)  # w radianach
+y_pred_heading = np.rad2deg(y_pred_heading)  # w stopniach
+
+mae_heading = mean_absolute_error(y_test_inverse[:, 3], y_pred_heading)
+print(f'MAE dla heading: {mae_heading}')
+
+# Wizualizacja wyników
+plt.figure(figsize=(14, 5))
+features = ['location-long', 'location-lat', 'ground-speed', 'heading_sin', 'heading_cos']
+for i in range(5):  # Sprawdź, czy jest 5 cech
+    plt.subplot(2, 3, i + 1)  # Użyj 2 wierszy, 3 kolumny dla 5 cech
+    plt.plot(y_train_inverse[:, i], color='blue', label='Actual')
+    plt.plot(train_predictions[:, i], color='red', linestyle='dashed', label='Predicted')
+    plt.title(features[i])
+    plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Wizualizacja straty
+plt.plot(history.history['loss'])
+plt.title('Model loss')
+plt.ylabel('loss')
+plt.xlabel('Epoch')
+plt.show()
+
+mae = mean_absolute_error(y_test_inverse, test_predictions)
+print(f'MAE: {mae}')
+
+mse = mean_squared_error(y_test_inverse, test_predictions)
+print(f'MSE: {mse}')
+
+errors = np.abs(y_test_inverse[:,3]- y_pred_heading)
+plt.figure(figsize=(10,5))
+plt.hist(errors, bins= 30, color = 'grey', edgecolor = 'black')
+plt.xlabel('Błąd (stopnie)')
+plt.ylabel('Częstotliwość')
+plt.title('Histogram błędów przewidywań')
+plt.show()
+
+predictions_df = pd.DataFrame(y_pred, columns=['location-long_pred', 'location-lat_pred', 'ground-speed_pred', 'heading_sin_pred', 'heading_cos_pred'])
+
+actual_values_df = pd.DataFrame(y_test_inverse, columns=['location-long', 'location-lat', 'ground-speed', 'heading_sin', 'heading_cos'])
+print("Kolumny w actual_values_df:", actual_values_df.columns)
+
+actual_values_df['heading'] = np.rad2deg(np.arctan2(actual_values_df['heading_sin'], actual_values_df['heading_cos']))
+results_df = pd.concat([actual_values_df, predictions_df], axis=1)
+
+
+results_df['heading_pred'] = np.rad2deg(np.arctan2(predictions_df['heading_sin_pred'], predictions_df['heading_cos_pred']))
+
+
+print("Kolumny w results_df:", results_df.columns)
+results_df['heading_error'] = np.abs(results_df['heading'] - results_df['heading_pred'])
+
+print(results_df.head())
+results_df.to_csv('predictions_vs_actual.csv', index=False)
